@@ -1,0 +1,12 @@
+.venv/
+venv/
+*.db
+taichi*.db
+*.csv
+*.xlsx
+*.xls
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
+.idea/
