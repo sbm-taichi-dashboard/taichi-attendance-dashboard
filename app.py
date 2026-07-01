@@ -993,64 +993,101 @@ elif page=="Attendance Trends":
                     st.dataframe(pd.DataFrame(lst).sort_values("Status"), use_container_width=True, hide_index=True)
                     st.markdown("</div>", unsafe_allow_html=True)
 
-                ##Session-by-session attendance grid (present/absent per class meeting)
+                ##Session-by-session attendance grid
                 st.markdown(f"<div class='card'><div class='card-title'>Session-by-Session Attendance — {unit_label}</div>", unsafe_allow_html=True)
-                # each distinct class meeting = one session column, in date order
+                #sessions shown = whatever calendar range the user picked
                 sess = sorted(cdf["Session Date"].dropna().dt.normalize().unique())
                 if not sess:
                     st.caption("No sessions in the selected range.")
                 else:
-                    total_sessions = len(sess)
-                    # how many recent sessions to show (toggle for long courses)
-                    if total_sessions > 4:
-                        opts = [n for n in [4,6,8,12] if n < total_sessions] + [total_sessions]
-                        opts = sorted(set(opts))
-                        labels = [(f"Last {n}" if n < total_sessions else f"All {total_sessions}") for n in opts]
-                        choice = st.radio("Show", labels, horizontal=True,
-                                          index=len(labels)-1)
-                        nshow = opts[labels.index(choice)]
-                    else:
-                        nshow = total_sessions
-                    shown = sess[-nshow:]
+                    #flag rule: missed the last 3+ sessions in a row (computed per class)
+                    def _flagged(subdf, min_consec=3):
+                        s = sorted(pd.to_datetime(subdf["Session Date"], errors="coerce").dropna().dt.normalize().unique())
+                        if len(s) < min_consec:
+                            return set()
+                        pres = {d: set(subdf[subdf["Session Date"].dt.normalize()==d]["Email"]) for d in s}
+                        out = set()
+                        for em in subdf["Email"].dropna().unique():
+                            run = 0
+                            for d in reversed(s):
+                                if em in pres[d]:
+                                    break
+                                run += 1
+                            if run >= min_consec:
+                                out.add(em)
+                        return out
 
-                    # build present-set per session
-                    present_by = {s: set(cdf[cdf["Session Date"].dt.normalize()==s]["Email"]) for s in sess}
-                    people = sorted(cdf["Email"].unique())
+                    #status is judged on the full class history, not just the visible window
+                    cur_topics = set(cdf["Topic"].dropna().unique())
+                    unit_hist = att[att["Topic"].isin(cur_topics)].copy()
+                    flagged_here = _flagged(unit_hist)
+
+                    ##Cross-class check: is a flagged person still keeping up in another class
+                    other_topics = [t for t in att["Topic"].dropna().unique() if t not in cur_topics]
+                    active_elsewhere = {}
+                    for t in other_topics:
+                        tdf = att[att["Topic"]==t]
+                        t_flagged = _flagged(tdf)
+                        short = t.split(":")[1].strip().split(" ET")[0] if ":" in t else t
+                        for em in tdf["Email"].dropna().unique():
+                            if em not in t_flagged:
+                                active_elsewhere.setdefault(em, []).append(short)
+
+                    #present set per shown session
+                    present_by = {d: set(cdf[cdf["Session Date"].dt.normalize()==d]["Email"]) for d in sess}
+                    people = sorted(cdf["Email"].dropna().unique())
                     nm = ps.set_index("Email") if "Email" in ps.columns else pd.DataFrame()
 
+                    date_cols = [pd.Timestamp(d).strftime("%a %b %d") for d in sess]
                     rows = []
+                    meta = {}
                     for em in people:
-                        attended_sessions = [s for s in sess if em in present_by[s]]
-                        total_att = len(attended_sessions)
-                        last_seen = attended_sessions[-1] if attended_sessions else None
-                        last_lbl = f"S{sess.index(last_seen)+1}" if last_seen is not None else "—"
-                        # cross-class: active in another class in last 21 days
-                        cur_topics = set(cdf["Topic"].unique())
-                        elsewhere = att[(att["Email"]==em) & (~att["Topic"].isin(cur_topics)) &
-                                        (att["Session Date"]>=(sess[-1]-pd.Timedelta(days=21)))]["Topic"].unique()
-                        also = ", ".join([t.split(":")[1].strip().split(" ET")[0] if ":" in t else t for t in elsewhere])
-                        row = {"Name": (f"{nm.loc[em,'First Name']} {nm.loc[em,'Last Name']}".strip()
-                                        if em in nm.index and "First Name" in nm.columns else em),
-                               "Email": em}
-                        for i, s in enumerate(shown, start=len(sess)-len(shown)+1):
-                            row[f"S{i}"] = "✓" if em in present_by[s] else "✗"
-                        row["Attended"] = f"{total_att} / {total_sessions}"
-                        row["Last seen"] = last_lbl
-                        row["Also active in"] = also
+                        attended = [d for d in sess if em in present_by[d]]
+                        nm_txt = (f"{nm.loc[em,'First Name']} {nm.loc[em,'Last Name']}".strip()
+                                  if em in nm.index and "First Name" in nm.columns else em) or em
+                        is_flagged = em in flagged_here
+                        elsewhere = sorted(set(active_elsewhere.get(em, [])))
+                        priority = is_flagged and not elsewhere
+                        row = {"Participant": nm_txt}
+                        for d, c in zip(sess, date_cols):
+                            row[c] = "attended" if em in present_by[d] else ""
+                        row["Seen"] = f"{len(attended)} / {len(sess)}"
+                        row["Cross-class"] = ("active in " + ", ".join(elsewhere)) if (is_flagged and elsewhere) else ""
                         rows.append(row)
+                        meta[nm_txt] = (priority, is_flagged and bool(elsewhere))
                     grid = pd.DataFrame(rows)
 
-                    # sort: most-recently-absent first (fewest of the shown sessions attended, then earliest last-seen)
-                    sc = [c for c in grid.columns if c.startswith("S") and c[1:].isdigit()]
-                    grid["_missed"] = grid[sc].apply(lambda r: (r=="✗").sum(), axis=1)
-                    grid = grid.sort_values(["_missed"], ascending=False).drop(columns="_missed")
+                    ##Optional: collapse to just the people who have been missing
+                    only_flagged = st.checkbox("Show flagged only (missed last 3+ sessions)", value=False)
+                    if only_flagged:
+                        keep = [n for n in grid["Participant"]
+                                if meta.get(n,(False,False))[0] or meta.get(n,(False,False))[1]]
+                        grid = grid[grid["Participant"].isin(keep)]
 
-                    show_cols = ["Name"] + sc + ["Attended","Last seen","Also active in"]
-                    st.dataframe(grid[show_cols], use_container_width=True, hide_index=True, height=460)
-                    st.caption(f"Session dates: " + "  ".join(
-                        f"S{sess.index(s)+1}={pd.Timestamp(s).strftime('%b %d')}" for s in shown))
+                    #alphabetical by participant
+                    grid = grid.sort_values("Participant").reset_index(drop=True)
+
+                    ##Styling: soft green for attended, amber name for real follow-ups
+                    def _style(_):
+                        sty = pd.DataFrame("", index=grid.index, columns=grid.columns)
+                        for c in date_cols:
+                            sty[c] = grid[c].map(lambda v: "background-color:#DEF2EA;color:#0F6E56"
+                                                 if v=="attended" else "background-color:#F6F6F4")
+                        for i in grid.index:
+                            pr, _ae = meta.get(grid.at[i,"Participant"], (False,False))
+                            if pr:
+                                sty.at[i,"Participant"] = "background-color:#FAEEDA;color:#633806;font-weight:600"
+                        return sty
+
+                    disp = grid.copy()
+                    for c in date_cols:
+                        disp[c] = disp[c].map(lambda v: "✓" if v=="attended" else "")
+                    st.dataframe(disp.style.apply(_style, axis=None),
+                                 use_container_width=True, hide_index=True, height=460)
+
+
                     st.download_button("Download roster (.csv)",
-                        grid[["Name","Email"]+sc+["Attended","Last seen","Also active in"]].to_csv(index=False).encode(),
+                        grid.to_csv(index=False).encode(),
                         f"Roster_{unit_label.replace(' ','_')}_{date.today()}.csv", "text/csv")
                 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1066,7 +1103,6 @@ elif page=="Participant Records":
     on_hold = n2.checkbox("Mark as On Hold")
     ptype = st.selectbox("Participant type",
         ["Participant","Instructor","Tech support","Student observer","Non-participant"])
-    st.caption("Participant type lets you flag someone who isn't a regular participant. On Hold keeps the person in the follow-up list but flags them so you know not to reach out; it clears automatically after the 'until' date.")
     note_text = st.text_area("Note", placeholder="e.g. On vacation, will return May 1. / Already spoke by phone.")
     ab1, ab2 = st.columns(2)
     hold_start = ab1.date_input("On Hold from", value=None)
@@ -1182,16 +1218,21 @@ elif page=="Database":
     xr = a2.file_uploader("New registration CSVs", type="csv", accept_multiple_files=True, key="xr")
     if (xp or xr) and st.button("Add to Database", type="primary"):
         with st.spinner("Processing..."):
-            res = process(xp or [], xr or [])
+            #store whatever was added (either type), then rebuild from every file on record
+            cur_q = merged["Quarter"].dropna()
+            cur_q = cur_q[cur_q!="Unknown"].mode()
+            cur_q = cur_q.iloc[0] if len(cur_q) else "Unknown"
+            for f in (xp or []): store_file(DB_PATH, f, "participation", cur_q)
+            for f in (xr or []): store_file(DB_PATH, f, "registration", cur_q)
+            res = reprocess_from_stored(DB_PATH)
         if "error" in res:
             st.error(res["error"])
         else:
             qq = res["merged"]["Quarter"].dropna()
             qq = qq[qq!="Unknown"].mode()
             quarter = qq.iloc[0] if len(qq) else "Unknown"
-            save_db(DB_PATH, res["merged"], res["ps"], quarter)
-            for f in (xp or []): mark_file(DB_PATH, f.name, quarter, "participation"); store_file(DB_PATH, f, "participation", quarter)
-            for f in (xr or []): mark_file(DB_PATH, f.name, quarter, "registration"); store_file(DB_PATH, f, "registration", quarter)
+            for f in (xp or []): mark_file(DB_PATH, f.name, quarter, "participation")
+            for f in (xr or []): mark_file(DB_PATH, f.name, quarter, "registration")
             m2, p2, _ = load_db(DB_PATH)
             st.session_state.update({"merged":m2, "ps":p2})
             st.success("Files added.")
