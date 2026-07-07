@@ -565,7 +565,7 @@ if st.session_state["page"]=="Home":
                 st.warning("Type a name first (e.g. Spring 2026)")
 
     st.write("")
-    c1, c2, c3 = st.columns(3)
+    c1, c3 = st.columns(2)
     with c1:
         n = "stored" if db_has_data(DB_PATH) else "empty"
         st.markdown(f"<div class='card' style='border-top:3px solid #8B0000'>"
@@ -574,13 +574,6 @@ if st.session_state["page"]=="Home":
                     unsafe_allow_html=True)
         st.button("Open", key="b_db", on_click=open_db, type="primary",
                   use_container_width=True, disabled=not db_has_data(DB_PATH))
-    with c2:
-        st.markdown("<div class='card' style='border-top:3px solid #555'>"
-                    "<div class='card-title'>Upload New Quarter</div>"
-                    "<div style='font-size:12px;color:#777'>Process raw Zoom CSV files.</div></div>",
-                    unsafe_allow_html=True)
-        st.button("Upload", key="b_up", on_click=set_flow, args=("new",),
-                  use_container_width=True)
     with c3:
         st.markdown("<div class='card' style='border-top:3px solid #555'>"
                     "<div class='card-title'>Historical Reports</div>"
