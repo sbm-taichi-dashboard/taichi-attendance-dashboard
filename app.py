@@ -638,14 +638,17 @@ with st.sidebar:
     all_q = [q for q in all_q if q and q!="Unknown"]
     all_t = sorted([t for t in merged["Topic"].dropna().unique()
                     if t and len(str(t))>2 and not is_rogue(t)]) if "Topic" in merged.columns else []
-    sel_q = st.multiselect("Quarter", all_q, default=all_q)
-    sel_t = st.multiselect("Class", all_t, default=all_t)
 
     st.markdown("<div class='sidebar-label'>Status Reference</div>", unsafe_allow_html=True)
     status_ref = st.radio("Calculate Active/Inactive/Dropped from",
         ["Today's date", "Last session date"],
         help="Today = live view of who is currently active. Last session = status as of the most recent class (useful after a quarter ends).",
         label_visibility="collapsed")
+
+    sel_q = st.multiselect("Quarter", all_q, default=all_q,
+        help="Click the box and type to search a quarter.")
+    sel_t = st.multiselect("Class", all_t, default=all_t,
+        help="Click the box and type to search a class.")
 
 if not sel_q: sel_q = all_q
 if not sel_t: sel_t = all_t
@@ -905,21 +908,81 @@ elif page=="Export":
 
     import io
     buf = io.BytesIO()
+    attended20 = fm[fm["Attendance_Status"]=="Attended 20+ Minutes"] if "Attendance_Status" in fm.columns else fm.iloc[0:0]
     with pd.ExcelWriter(buf, engine="xlsxwriter") as xl:
-        #include everyone, no-shows included (ps holds registered-but-never-attended too)
-        fu_cols = [c for c in ["Email","First Name","Last Name","Phone","Participant Type",
-                   "Participation Count","Participation Status","Active Status","On Hold",
-                   "Last Attended Date","Days Since Last Attended","Last Class Attended",
-                   "Highest level","Household","Comments"] if c in ps.columns]
-        ps[fu_cols].to_excel(xl, sheet_name="Participant Status", index=False)
-        att = fm[fm["Attendance_Status"]=="Attended 20+ Minutes"]
-        if "Topic" in att.columns:
-            bt = att.pivot_table(index="Email", columns="Topic", values="durationMinutesTotal",
-                                 aggfunc="count", fill_value=0).reset_index()
-            bt.to_excel(xl, sheet_name="Attendance By Topic", index=False)
-        rec = fm[[c for c in ["Email","Topic","Quarter","Start time","durationMinutesTotal","Attendance_Status"]
-                  if c in fm.columns]]
-        rec.to_excel(xl, sheet_name="Attendance Records", index=False)
+        wrote = []
+
+        #Summary metrics
+        try:
+            pc = ps["Participation Count"] if "Participation Count" in ps.columns else pd.Series(dtype=float)
+            metrics = pd.DataFrame({
+                "Metric":["Total Participants","Unique Attendees (20+ min)","Completers (10+)","Avg Sessions / Person"],
+                "Value":[len(ps), attended20["Email"].nunique(),
+                         int((pc>=10).sum()) if len(pc) else 0,
+                         round(float(pc.mean()),1) if len(pc) else 0]})
+            metrics.to_excel(xl, sheet_name="Summary", index=False); wrote.append("Summary")
+        except Exception: pass
+
+        #Participant Status (everyone, no-shows included)
+        try:
+            fu_cols = [c for c in ["Email","First Name","Last Name","Phone","Participant Type",
+                       "Participation Count","Participation Status","Active Status","On Hold",
+                       "Last Attended Date","Days Since Last Attended","Last Class Attended",
+                       "Highest level","Household","Comments"] if c in ps.columns]
+            ps[fu_cols].to_excel(xl, sheet_name="Participant Status", index=False); wrote.append("Participant Status")
+        except Exception: pass
+
+        #Follow-Up (people to reach out to: dropped or never attended)
+        try:
+            if "Active Status" in ps.columns:
+                fdf = ps[ps["Active Status"].isin(["Dropped","No Attendance"])]
+                fdf[[c for c in fu_cols if c in fdf.columns]].to_excel(xl, sheet_name="Follow-Up", index=False)
+                wrote.append("Follow-Up")
+        except Exception: pass
+
+        #By Class: average attendance per session
+        try:
+            if "Topic" in attended20.columns and len(attended20):
+                bc = attended20.groupby("Topic").agg(Attendances=("Email","count"),
+                        Sessions=("Start time","nunique"), Unique_People=("Email","nunique"))
+                bc["Avg per Session"] = (bc["Attendances"]/bc["Sessions"].clip(lower=1)).round(1)
+                bc.reset_index().to_excel(xl, sheet_name="By Class", index=False); wrote.append("By Class")
+        except Exception: pass
+
+        #Attendance By Topic (per-person session counts)
+        try:
+            if "Topic" in attended20.columns and len(attended20):
+                bt = attended20.pivot_table(index="Email", columns="Topic", values="durationMinutesTotal",
+                                     aggfunc="count", fill_value=0).reset_index()
+                bt.to_excel(xl, sheet_name="Attendance By Topic", index=False); wrote.append("Attendance By Topic")
+        except Exception: pass
+
+        #Attendance Records (raw sessions)
+        try:
+            rec = fm[[c for c in ["Email","Topic","Quarter","Start time","durationMinutesTotal","Attendance_Status"]
+                      if c in fm.columns]]
+            rec.to_excel(xl, sheet_name="Attendance Records", index=False); wrote.append("Attendance Records")
+        except Exception: pass
+
+        #Households (family links with names)
+        try:
+            hc = sqlite3.connect(DB_PATH)
+            hh = pd.read_sql("SELECT email_a, email_b, household_name FROM households", hc)
+            hc.close()
+            if len(hh):
+                def _nm(e):
+                    r = ps[ps["Email"]==e]
+                    return (f"{r['First Name'].iloc[0]} {r['Last Name'].iloc[0]}".strip()
+                            if len(r) and "First Name" in r.columns else e)
+                hh.insert(0, "Person A", hh["email_a"].map(_nm))
+                hh.insert(2, "Person B", hh["email_b"].map(_nm))
+                hh = hh.rename(columns={"email_a":"Email A","email_b":"Email B","household_name":"Household"})
+                hh.to_excel(xl, sheet_name="Households", index=False); wrote.append("Households")
+        except Exception: pass
+
+        #safety: never write an empty workbook
+        if not wrote:
+            ps.to_excel(xl, sheet_name="Participant Status", index=False)
     st.download_button("Download Full Workbook (.xlsx)", buf.getvalue(),
                        f"TaiChi_Report_{date.today()}.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1139,6 +1202,12 @@ elif page=="Attendance Trends":
                             wsx.write(0, ci, cname, hdr)
                             width = 26 if cname in ("Participant","Email","Cross-class","Comments") else 12
                             wsx.set_column(ci, ci, width, txt)
+                        #carry the on-screen amber highlight into the file for flagged names
+                        amber = wb.add_format({"num_format":"@","bg_color":"#FAEEDA","font_color":"#633806","bold":True})
+                        for i in out.index:
+                            pr, _s = meta.get(out.at[i,"Participant"], (False,False))
+                            if pr:
+                                wsx.write(i+1, 0, out.at[i,"Participant"], amber)
                         wsx.freeze_panes(1, 0)
                     st.download_button("Download roster (.xlsx)", xbuf.getvalue(),
                         f"Roster_{unit_label.replace(' ','_')}_{date.today()}.xlsx",
