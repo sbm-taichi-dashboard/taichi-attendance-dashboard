@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import sqlite3, hashlib, re, os, glob
+import sqlite3, hashlib, re, os, glob, io
 from datetime import date
 
 st.set_page_config(page_title="SBM Tai Chi Attendance", layout="wide",
@@ -57,6 +57,11 @@ for k, v in {"page":"Home", "flow":None, "loaded":False, "db_path":"taichi.db",
     st.session_state.setdefault(k, v)
 
 DB_PATH = st.session_state["db_path"]
+
+#keep filter/picker choices alive when the user visits another page and comes back
+for _pk in ["at_mode","at_from","at_to","at_class","at_level","at_view","at_flagby","at_flaggedonly","fu_pick","pr_pick"]:
+    if _pk in st.session_state:
+        st.session_state[_pk] = st.session_state[_pk]
 
 #Data Engine
 def read_csv_smart(f):
@@ -516,6 +521,21 @@ def open_db():
     except Exception as e:
         st.error(f"Could not open database: {e}")
 
+def person_options(psdf):
+    """Return (labels, {label: email}) for a type-to-search participant picker."""
+    labels = []
+    if psdf is None or "Email" not in getattr(psdf, "columns", []):
+        return [], {}
+    rows = []
+    for _, r in psdf.iterrows():
+        em = str(r.get("Email","") or "").strip()
+        if not em or em == "nan": continue
+        nm = f"{r.get('First Name','') or ''} {r.get('Last Name','') or ''}".strip()
+        lab = f"{nm} — {em}" if nm else em
+        rows.append((nm.lower(), lab, em))
+    rows.sort()
+    return [l for _, l, _ in rows], {l: e for _, l, e in rows}
+
 #Home Page
 if st.session_state["page"]=="Home":
     st.markdown("<div class='page-head'>SBM Falls Prevention — Tai Chi Attendance Dashboard</div>",
@@ -780,16 +800,13 @@ elif page=="Follow-Up List":
 
     f1, f2 = st.columns([1,2])
     sf = f1.selectbox("Status", ["All","Active","Inactive","Dropped","No Attendance"])
-    search = f2.text_input("Search", placeholder="Name or email...")
+    _labels, _emap = person_options(ps)
+    picked = f2.selectbox("Search participant (type a name or an email)", [""] + _labels, key="fu_pick")
+    sel_email = _emap.get(picked)
 
     disp = ps if sf == "All" else ps[ps["Active Status"] == sf]
-    if search:
-        s = search.lower()
-        mask = pd.Series(False, index=disp.index)
-        for c in ["Email","First Name","Last Name"]:
-            if c in disp.columns:
-                mask |= disp[c].astype(str).str.lower().str.contains(s, na=False)
-        disp = disp[mask]
+    if sel_email:
+        disp = disp[disp["Email"]==sel_email]
 
     cols = [c for c in ["Email","First Name","Last Name","Phone","Active Status","On Hold",
             "Last Attended Date","Days Since Last Attended","Last Class Attended",
@@ -803,21 +820,10 @@ elif page=="Follow-Up List":
 
     ##Participant detail — driven by the search box above
     st.markdown("<div class='card'><div class='card-title'>View Participant Detail</div>", unsafe_allow_html=True)
-    if not search:
-        st.caption("Type a name or email in the Search box above to see a participant's full detail here.")
-    elif len(disp)==0:
-        st.caption("No match — try a different search.")
+    if not sel_email:
+        st.caption("Pick a participant above (type their name or email) to see their full detail here.")
     else:
-        # if search narrows to a few people, show a small picker; if one, show directly
-        if len(disp) > 1:
-            opts = {}
-            for _, r in disp.iterrows():
-                nm = f"{r.get('First Name','')} {r.get('Last Name','')}".strip() or r["Email"]
-                opts[f"{nm}  ({r['Email']})"] = r["Email"]
-            pick = st.radio("Matches", list(opts.keys()), label_visibility="collapsed")
-            em = opts[pick]
-        else:
-            em = disp.iloc[0]["Email"]
+        em = sel_email
 
         person_rows = merged[merged["Email"]==em] if "Email" in merged.columns else pd.DataFrame()
         reg_classes = sorted([t for t in person_rows["Topic"].dropna().unique()
@@ -867,7 +873,9 @@ elif page=="Follow-Up List":
                         partners.append(f"{oname or other} ({other})")
                     if partners:
                         hhname = hrows.iloc[0]["household_name"] if len(hrows) and hrows.iloc[0]["household_name"] else ""
-                        st.markdown(f"- Household{f' ({hhname})' if hhname else ''}: **" + "; ".join(partners) + "**")
+                        self_nm = f"{pr.get('First Name','') or ''} {pr.get('Last Name','') or ''}".strip() or em
+                        members = [f"{self_nm} ({em})"] + partners
+                        st.markdown(f"- Household{f' ({hhname})' if hhname else ''}: **" + "; ".join(members) + "**")
                 except Exception:
                     pass
 
@@ -1093,7 +1101,7 @@ elif page=="Attendance Trends":
                         row = {"Participant": nm_txt, "Email": em}
                         for d, c in zip(sess, date_cols):
                             row[c] = "attended" if em in present_by[d] else ""
-                        row["Seen"] = f"{len(attended)} / {len(sess)}"
+                        row["Seen"] = f"{len(attended)} of {len(sess)}"
                         row["Cross-class"] = ("active in " + ", ".join(elsewhere)) if (is_flagged and elsewhere) else ""
                         row["Participant Type"] = ptype_map.get(em, "Participant")
                         row["Comments"] = comments_map.get(em, "")
@@ -1123,9 +1131,25 @@ elif page=="Attendance Trends":
                         disp[c] = disp[c].map(lambda v: "✓" if v=="attended" else "")
                     st.dataframe(disp.style.apply(_style, axis=None), use_container_width=True, hide_index=True, height=460)
 
+                    #export to Excel so nothing gets reformatted on open (dates, counts, etc.)
                     dl_cols = ["Participant","Email","Participant Type"] + date_cols + ["Seen","Cross-class","Comments"]
-                    st.download_button("Download roster (.csv)", grid[dl_cols].to_csv(index=False).encode(),
-                        f"Roster_{unit_label.replace(' ','_')}_{date.today()}.csv", "text/csv")
+                    out = grid[dl_cols].copy()
+                    for c in date_cols:
+                        out[c] = out[c].map(lambda v: "Present" if v=="attended" else "")
+                    xbuf = io.BytesIO()
+                    with pd.ExcelWriter(xbuf, engine="xlsxwriter") as xw:
+                        out.to_excel(xw, sheet_name="Attendance", index=False)
+                        wb, wsx = xw.book, xw.sheets["Attendance"]
+                        txt = wb.add_format({"num_format":"@"})
+                        hdr = wb.add_format({"bold":True,"bg_color":"#8A1A1A","font_color":"#FFFFFF","border":1})
+                        for ci, cname in enumerate(out.columns):
+                            wsx.write(0, ci, cname, hdr)
+                            width = 26 if cname in ("Participant","Email","Cross-class","Comments") else 12
+                            wsx.set_column(ci, ci, width, txt)
+                        wsx.freeze_panes(1, 0)
+                    st.download_button("Download roster (.xlsx)", xbuf.getvalue(),
+                        f"Roster_{unit_label.replace(' ','_')}_{date.today()}.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 st.markdown("</div>", unsafe_allow_html=True)
 
 #Comments & Households
@@ -1136,7 +1160,9 @@ elif page=="Participant Records":
 
     st.markdown("<div class='card'><div class='card-title'>Add or Update a Note</div>", unsafe_allow_html=True)
     n1, n2 = st.columns([2,1])
-    note_email = n1.text_input("Participant email").strip().lower()
+    _plabels, _pemap = person_options(ps)
+    _ppick = n1.selectbox("Find participant (type a name or an email)", [""] + _plabels, key="pr_pick")
+    note_email = (_pemap.get(_ppick) or n1.text_input("Or enter email manually").strip().lower())
     on_hold = n2.checkbox("Mark as On Hold")
     ptype = st.selectbox("Participant type",
         ["Participant","Instructor","Tech support","Student observer","Non-participant"])
