@@ -1401,3 +1401,5 @@ elif page=="Database":
         st.caption("No quarters to remove.")
     st.markdown("</div>", unsafe_allow_html=True)
     conn.close()
+
+    
