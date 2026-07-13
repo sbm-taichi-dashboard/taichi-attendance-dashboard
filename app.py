@@ -271,7 +271,7 @@ def process(part_files, reg_files):
         sub = vlvl[vlvl["__level"] == lvl]
         last = sub.groupby("Email")["Start time"].max()
         col_date = f"{lvl} Last"
-        ps[col_date] = ps["Email"].map(last)
+        ps[col_date] = ps["Email"].map(last.to_dict())
         ps[col_date] = pd.to_datetime(ps[col_date], errors="coerce")
         days = (pd.Timestamp(date.today()) - ps[col_date]).dt.days
         ps[f"{lvl} Status"] = days.apply(classify_days)
@@ -1401,5 +1401,3 @@ elif page=="Database":
         st.caption("No quarters to remove.")
     st.markdown("</div>", unsafe_allow_html=True)
     conn.close()
-
-    
