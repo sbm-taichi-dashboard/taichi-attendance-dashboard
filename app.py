@@ -3,6 +3,13 @@ import pandas as pd
 import sqlite3, hashlib, re, os, glob, io
 from datetime import date
 
+#avoid the pyarrow-backed string engine, which can hard-crash Python 3.14
+for _opt in ("future.infer_string", "mode.string_storage"):
+    try:
+        pd.set_option(_opt, False if _opt=="future.infer_string" else "python")
+    except Exception:
+        pass
+
 st.set_page_config(page_title="SBM Tai Chi Attendance", layout="wide",
                    initial_sidebar_state="expanded")
 
@@ -1098,47 +1105,63 @@ elif page=="Attendance Trends":
                 else:
                     #flag basis: whole weeks (forgives skipping one class in a week) or single sessions
                     flag_by = st.radio("Flag absences by", ["Week","Session"], horizontal=True, key="at_flagby",
-                        help="Week: only flag after missing 3 full weeks in a row, so attending any class in a week counts. Session: flag after 3 missed class meetings in a row.")
-
-                    def _flagged(subdf, by="Week", min_consec=3):
-                        sd = pd.to_datetime(subdf["Session Date"], errors="coerce")
-                        sub = subdf.assign(_b=(sd.dt.to_period("W").astype(str) if by=="Week" else sd.dt.normalize().astype(str)))
-                        sub = sub[sub["_b"].notna() & (sub["_b"]!="NaT")]
-                        buckets = sorted(sub["_b"].unique())
-                        if len(buckets) < min_consec:
-                            return set()
-                        pres = {b: set(sub[sub["_b"]==b]["Email"]) for b in buckets}
-                        out = set()
-                        for em in sub["Email"].dropna().unique():
-                            run = 0
-                            for b in reversed(buckets):
-                                if em in pres[b]: break
-                                run += 1
-                            if run >= min_consec: out.add(em)
-                        return out
+                        help="A person is judged only on the classes they attend, across the dates shown. Week: flag after missing 3 full weeks in a row. Session: flag after 3 missed meetings in a row.")
 
                     cur_topics = set(cdf["Topic"].dropna().unique())
-                    unit_hist = att[att["Topic"].isin(cur_topics)].copy()
-                    flagged_here = _flagged(unit_hist, flag_by)
-
-                    ##Cross-class: still keeping up in another class means not a real follow-up
-                    other_topics = [t for t in att["Topic"].dropna().unique() if t not in cur_topics]
-                    active_elsewhere = {}
-                    for t in other_topics:
-                        tdf = att[att["Topic"]==t]
-                        t_flagged = _flagged(tdf, flag_by)
-                        short = t.split(":")[1].strip().split(" ET")[0] if ":" in t else t
-                        for em in tdf["Email"].dropna().unique():
-                            if em not in t_flagged:
-                                active_elsewhere.setdefault(em, []).append(short)
-
                     present_by = {d: set(cdf[cdf["Session Date"].dt.normalize()==d]["Email"]) for d in sess}
 
-                    #include registered-but-never-attended people for this unit (no-shows)
+                    #per-topic attendance within the visible window (for own-class and cross-class checks)
+                    win_lo, win_hi = pd.Timestamp(sess[0]), pd.Timestamp(sess[-1])
+                    attw = att[(att["Session Date"].dt.normalize()>=win_lo) & (att["Session Date"].dt.normalize()<=win_hi)]
+                    tdates, tpres, tpeople = {}, {}, {}
+                    for t in attw["Topic"].dropna().unique():
+                        sub = attw[attw["Topic"]==t]
+                        ds = sorted(sub["Session Date"].dt.normalize().unique())
+                        tdates[t] = ds
+                        tpres[t] = {d: set(sub[sub["Session Date"].dt.normalize()==d]["Email"]) for d in ds}
+                        tpeople[t] = set(sub["Email"].dropna().unique())
+
+                    def _wk(d): return str(pd.Timestamp(d).to_period("W"))
+
+                    def _flag_person(em, topics_set, by, min_consec=3):
+                        if not topics_set: return False
+                        dates = sorted(set().union(*[set(tdates.get(t,[])) for t in topics_set]))
+                        if not dates: return False
+                        if by=="Week":
+                            keys = sorted(set(_wk(d) for d in dates))
+                            present = set(_wk(d) for t in topics_set for d in tdates.get(t,[]) if em in tpres[t][d])
+                        else:
+                            keys = dates
+                            present = set(d for t in topics_set for d in tdates.get(t,[]) if em in tpres[t][d])
+                        if len(keys) < min_consec: return False
+                        run = 0
+                        for k in reversed(keys):
+                            if k in present: break
+                            run += 1
+                        return run >= min_consec
+
+                    #here (attended) vs no-show (registered for this unit, never attended)
                     attended_here = set(cdf["Email"].dropna().unique())
                     unit_reg = set(fm[fm["Topic"].isin(cur_topics)]["Email"].dropna().unique()) if "Topic" in fm.columns else set()
                     noshow_here = set(e for e in unit_reg if e not in attended_here)
                     people = sorted(attended_here | noshow_here)
+
+                    #flag: judge each person only on the classes they attend, within the window shown
+                    ptopic_map = cdf.groupby("Email")["Topic"].agg(lambda s: set(s)).to_dict()
+                    flagged_here = set()
+                    for em in attended_here:
+                        own = ptopic_map.get(em, set()) & cur_topics
+                        if own and _flag_person(em, own, flag_by):
+                            flagged_here.add(em)
+
+                    ##Cross-class: still keeping up in another class means not a real follow-up
+                    active_elsewhere = {}
+                    other_topics = [t for t in tdates if t not in cur_topics]
+                    for em in people:
+                        for t in other_topics:
+                            if em in tpeople.get(t, set()) and not _flag_person(em, {t}, flag_by):
+                                short = t.split(":")[1].strip().split(" ET")[0] if ":" in t else t
+                                active_elsewhere.setdefault(em, []).append(short)
 
                     nm = ps.set_index("Email") if "Email" in ps.columns else pd.DataFrame()
                     comments_map = dict(zip(ps["Email"], ps["Comments"])) if "Comments" in ps.columns else {}
