@@ -93,7 +93,7 @@ Then start the app the usual way.
 **Registration files** (these change each quarter): rename each one to match its class,
 using this pattern, joined with underscores:
 
-```
+```text
 Level_Days_Time_QuarterYear
 ```
 
