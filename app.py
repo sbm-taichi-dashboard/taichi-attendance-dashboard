@@ -951,21 +951,27 @@ elif page=="Export":
             metrics.to_excel(xl, sheet_name="Summary", index=False); wrote.append("Summary")
         except Exception: pass
 
-        #Participant Status (everyone, no-shows included)
+        #All Participants (everyone, no-shows included)
         try:
+            if "Participation Count" in ps.columns and "Completer" not in ps.columns:
+                ps = ps.copy()
+                ps["Completer"] = ps["Participation Count"].fillna(0).ge(10).map({True:"Completer", False:"Non-Completer"})
             fu_cols = [c for c in ["Email","First Name","Last Name","Phone","Participant Type",
-                       "Participation Count","Participation Status","Active Status","On Hold",
+                       "Participation Count","Completer","Participation Status","Active Status","On Hold",
                        "Last Attended Date","Days Since Last Attended","Last Class Attended",
                        "Highest level","Household","Comments"] if c in ps.columns]
-            ps[fu_cols].to_excel(xl, sheet_name="Participant Status", index=False); wrote.append("Participant Status")
+            ps[fu_cols].to_excel(xl, sheet_name="All Participants", index=False); wrote.append("All Participants")
         except Exception: pass
 
-        #Follow-Up (people to reach out to: dropped or never attended)
+        #Needs Follow-Up (inactive or never attended, trimmed to what outreach needs)
         try:
             if "Active Status" in ps.columns:
-                fdf = ps[ps["Active Status"].isin(["Dropped","No Attendance"])]
-                fdf[[c for c in fu_cols if c in fdf.columns]].to_excel(xl, sheet_name="Follow-Up", index=False)
-                wrote.append("Follow-Up")
+                fdf = ps[ps["Active Status"].isin(["Inactive","Dropped","No Attendance"])]
+                fu_short = [c for c in ["First Name","Last Name","Email","Phone","Active Status",
+                            "Completer","Last Attended Date","Days Since Last Attended","On Hold","Comments"]
+                            if c in fdf.columns]
+                fdf[fu_short].to_excel(xl, sheet_name="Needs Follow-Up", index=False)
+                wrote.append("Needs Follow-Up")
         except Exception: pass
 
         #By Class: average attendance per session
@@ -1010,7 +1016,7 @@ elif page=="Export":
 
         #safety: never write an empty workbook
         if not wrote:
-            ps.to_excel(xl, sheet_name="Participant Status", index=False)
+            ps.to_excel(xl, sheet_name="All Participants", index=False)
     st.download_button("Download Full Workbook (.xlsx)", buf.getvalue(),
                        f"TaiChi_Report_{date.today()}.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
