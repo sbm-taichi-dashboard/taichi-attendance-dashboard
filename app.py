@@ -33,11 +33,21 @@ st.markdown("""<style>
     background:#8B0000; color:#fff; padding:.85rem 1.25rem;
     border-radius:8px; font-size:18px; font-weight:700; margin-bottom:1.25rem; }
 .metric-card {
-    background:#fff; border:1px solid #eee; border-left:4px solid #8B0000;
-    border-radius:8px; padding:1rem 1.25rem; }
-.metric-num { font-size:30px; font-weight:800; color:#1a1a1a; line-height:1; }
+    background:#fff; border:1px solid #efe7e7; border-top:3px solid #8B0000;
+    border-radius:14px; padding:1.1rem 1.25rem;
+    box-shadow:0 2px 10px rgba(139,0,0,.06);
+    transition:transform .12s ease, box-shadow .12s ease; }
+.metric-card:hover { transform:translateY(-2px); box-shadow:0 7px 20px rgba(139,0,0,.13); }
+.metric-num { font-size:32px; font-weight:800; color:#8B0000; line-height:1; }
 .metric-lbl { font-size:11px; text-transform:uppercase; letter-spacing:.05em;
-    color:#777; margin-top:.4rem; }
+    color:#777; margin-top:.45rem; }
+.prog-row { margin:.6rem 0; }
+.prog-top { display:flex; justify-content:space-between; align-items:baseline;
+    font-size:13px; color:#333; margin-bottom:5px; }
+.prog-top b { color:#8B0000; font-size:14px; }
+.prog-track { background:#f1ecec; border-radius:8px; height:15px; overflow:hidden; }
+.prog-fill { background:linear-gradient(90deg,#8B0000,#c0524f); height:100%;
+    border-radius:8px; }
 .card { background:#fff; border:1px solid #eee; border-radius:8px;
     padding:1.25rem; margin-bottom:1rem; }
 .card-title { font-size:13px; font-weight:700; text-transform:uppercase;
@@ -781,21 +791,29 @@ if page=="Summary":
             st.bar_chart(uq, height=300, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    with st.expander("Participant Status & Level Breakdown"):
+    with st.expander("Participant Status & Level Breakdown", expanded=True):
+        def _bars(pairs):
+            mx = max([c for _, c in pairs], default=1) or 1
+            html = ""
+            for lab, c in pairs:
+                pct = int(round(c / mx * 100))
+                html += (f"<div class='prog-row'><div class='prog-top'><span>{lab}</span>"
+                         f"<b>{c:,}</b></div><div class='prog-track'>"
+                         f"<div class='prog-fill' style='width:{pct}%'></div></div></div>")
+            return html
         b1, b2 = st.columns(2)
         with b1:
-            st.markdown("**Participants by Attendance Status**")
-            sc = pd.DataFrame({"Status":["Completer (10+)","Non-Completer","No Attendance"],
-                "Count":[(ps["Participation Count"]>10).sum(),
-                         ((ps["Participation Count"]<=10)&(ps["Participation Count"]>0)).sum(),
-                         (ps["Participation Count"]==0).sum()]})
-            st.bar_chart(sc.set_index("Status"), height=240)
+            st.markdown("<div class='card-title'>Participants by Attendance Status</div>", unsafe_allow_html=True)
+            pairs = [("Completer (10+)", int((ps["Participation Count"]>10).sum())),
+                     ("Non-Completer", int(((ps["Participation Count"]<=10)&(ps["Participation Count"]>0)).sum())),
+                     ("No Attendance", int((ps["Participation Count"]==0).sum()))]
+            st.markdown(_bars(pairs), unsafe_allow_html=True)
         with b2:
-            st.markdown("**Highest Tai Chi Level Reached**")
+            st.markdown("<div class='card-title'>Highest Tai Chi Level Reached</div>", unsafe_allow_html=True)
             if "Highest level" in ps.columns:
                 lc = ps["Highest level"].value_counts()
                 lc = lc[~lc.index.str.lower().isin(["unknown",""])]
-                st.bar_chart(lc, height=240)
+                st.markdown(_bars([(str(i), int(v)) for i, v in lc.items()]), unsafe_allow_html=True)
 
 #Follow-Up List
 elif page=="Follow-Up List":
@@ -1140,10 +1158,11 @@ elif page=="Attendance Trends":
                             run += 1
                         return run >= min_consec
 
-                    #here (attended) vs no-show (registered for this unit, never attended)
+                    #here (attended in the shown window) vs no-show (registered but never attended at all)
                     attended_here = set(cdf["Email"].dropna().unique())
+                    attended_ever = set(att[att["Topic"].isin(cur_topics)]["Email"].dropna().unique())
                     unit_reg = set(fm[fm["Topic"].isin(cur_topics)]["Email"].dropna().unique()) if "Topic" in fm.columns else set()
-                    noshow_here = set(e for e in unit_reg if e not in attended_here)
+                    noshow_here = set(e for e in unit_reg if e not in attended_ever)
                     people = sorted(attended_here | noshow_here)
 
                     #flag: judge each person only on the classes they attend, within the window shown
@@ -1185,14 +1204,14 @@ elif page=="Attendance Trends":
                         row["Participant Type"] = ptype_map.get(em, "Participant")
                         row["Comments"] = comments_map.get(em, "")
                         rows.append(row)
-                        meta[nm_txt] = (priority, is_flagged and bool(elsewhere))
+                        meta[em] = (priority, is_flagged and bool(elsewhere))
                     grid = pd.DataFrame(rows)
 
                     ##Optional: collapse to just the people who have been missing
                     only_flagged = st.checkbox("Show flagged only (missed the last 3 in a row)", value=False, key="at_flaggedonly")
                     if only_flagged:
-                        keep = [n for n in grid["Participant"] if meta.get(n,(False,False))[0] or meta.get(n,(False,False))[1]]
-                        grid = grid[grid["Participant"].isin(keep)]
+                        keep = {em for em in people if meta.get(em,(False,False))[0] or meta.get(em,(False,False))[1]}
+                        grid = grid[grid["Email"].isin(keep)]
 
                     grid = grid.sort_values("Participant").reset_index(drop=True)
 
@@ -1202,7 +1221,7 @@ elif page=="Attendance Trends":
                         for c in date_cols:
                             sty[c] = grid[c].map(lambda v: "background-color:#DEF2EA;color:#0F6E56" if v=="attended" else "background-color:#F6F6F4")
                         for i in grid.index:
-                            pr, _ae = meta.get(grid.at[i,"Participant"], (False,False))
+                            pr, _ae = meta.get(grid.at[i,"Email"], (False,False))
                             if pr: sty.at[i,"Participant"] = "background-color:#FAEEDA;color:#633806;font-weight:600"
                         return sty
                     disp = grid[disp_cols].copy()
