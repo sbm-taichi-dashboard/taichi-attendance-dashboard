@@ -828,8 +828,11 @@ elif page=="Follow-Up List":
     disp = ps if sf == "All" else ps[ps["Active Status"] == sf]
     if sel_email:
         disp = disp[disp["Email"]==sel_email]
+    if "Participation Count" in disp.columns:
+        disp = disp.copy()
+        disp["Completer"] = disp["Participation Count"].fillna(0).ge(10).map({True:"Completer", False:"Non-Completer"})
 
-    cols = [c for c in ["Email","First Name","Last Name","Phone","Active Status","On Hold",
+    cols = [c for c in ["Email","First Name","Last Name","Phone","Active Status","Completer","On Hold",
             "Last Attended Date","Days Since Last Attended","Last Class Attended",
             "Participant Type","Household","Comments"]
             if c in disp.columns]
@@ -1247,9 +1250,10 @@ elif page=="Attendance Trends":
                         #carry the on-screen amber highlight into the file for flagged names
                         amber = wb.add_format({"num_format":"@","bg_color":"#FAEEDA","font_color":"#633806","bold":True})
                         for i in out.index:
-                            pr, _s = meta.get(out.at[i,"Participant"], (False,False))
+                            pr, _s = meta.get(out.at[i,"Email"], (False,False))
                             if pr:
-                                wsx.write(i+1, 0, out.at[i,"Participant"], amber)
+                                for ci, cname in enumerate(out.columns):
+                                    wsx.write(i+1, ci, out.at[i, cname], amber)
                         wsx.freeze_panes(1, 0)
                     st.download_button("Download roster (.xlsx)", xbuf.getvalue(),
                         f"Roster_{unit_label.replace(' ','_')}_{date.today()}.xlsx",
