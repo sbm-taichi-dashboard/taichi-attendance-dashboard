@@ -19,6 +19,27 @@ ROGUE_TOPICS = ["virtual otago", "parkinson", "sbm falls", "dissertaion",
 STAFF_KEYWORDS = ["fallsfree", "stonybrook"]
 LEVEL_MAP = {"full form": 3, "level 2": 2, "level 1": 1}
 
+# ==================================================================
+#  ZOOM FILE FORMAT SETTINGS  —  EDIT HERE if Zoom changes its exports
+# ------------------------------------------------------------------
+#  Every value below is the exact text Zoom puts in its download files.
+#  If Zoom renames a column, moves where the data starts, or changes
+#  the file type, this is the ONLY place you need to change. See the
+#  maintainer's guide for step-by-step instructions.
+# ==================================================================
+ZOOM_ENCODINGS = ["utf-8-sig", "utf-8", "latin-1", "cp1252"]  # text encodings to try when opening a file
+REG_HEADER_ROW = 5            # registration files have this many info rows before the real column headers
+ZOOM_DURATION  = "Duration (minutes).1"  # the PER-PERSON minutes column (the ".1" one). The plain
+                                         # "Duration (minutes)" is the whole meeting's length, not the person's.
+ZOOM_APPROVAL     = "Approval Status"    # registration column that says whether someone is registered
+ZOOM_APPROVAL_OK  = "approved"           # the value in that column that counts as registered
+
+# Rename maps: {what Zoom calls the column : what this app calls it}.
+# If Zoom renames a column, add or edit an entry here.
+ZOOM_PARTICIPATION_RENAME = {"ID": "Meeting ID", "User Email": "Email"}
+ZOOM_REGISTRATION_RENAME  = {"User Email": "Email", "Zip_Postal_Code": "Zip/Postal Code"}
+# ==================================================================
+
 #Styling
 st.markdown("""<style>
 [data-testid="stSidebar"] { background:#12122a; }
@@ -84,10 +105,10 @@ for _pk in ["at_mode","at_from","at_to","at_class","at_level","at_view","at_flag
 def read_csv_smart(f):
     """Read a Zoom CSV. Registration files have 5 metadata rows; participation
     files have headers on row 1. Tries header=5 first, falls back to header=0."""
-    for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
+    for enc in ZOOM_ENCODINGS:
         try:
             f.seek(0)
-            d5 = pd.read_csv(f, header=5, dtype=str, encoding=enc,
+            d5 = pd.read_csv(f, header=REG_HEADER_ROW, dtype=str, encoding=enc,
                              on_bad_lines="skip").dropna(how="all")
             d5.columns = [str(c).replace("\ufeff","").strip() for c in d5.columns]
             if len(d5.columns) >= 4 and any(
@@ -155,7 +176,7 @@ def process(part_files, reg_files):
     for f in part_files:
         try:
             raw = read_csv_smart(f)
-            raw = raw.rename(columns={"ID":"Meeting ID", "User Email":"Email"})
+            raw = raw.rename(columns=ZOOM_PARTICIPATION_RENAME)
             if "Email" not in raw.columns: skipped.append(f.name); continue
             pdfs.append(raw)
         except Exception as e:
@@ -165,7 +186,7 @@ def process(part_files, reg_files):
 
     mp = pd.concat(pdfs, ignore_index=True)
     mp["Email"] = mp["Email"].astype(str).str.strip().str.lower()
-    dur_col = "Duration (minutes).1" if "Duration (minutes).1" in mp.columns else \
+    dur_col = ZOOM_DURATION if ZOOM_DURATION in mp.columns else \
               next((c for c in mp.columns if "duration" in c.lower() and ".1" in c), None) or \
               next((c for c in mp.columns if "duration" in c.lower()), None)
     mp["dur"] = pd.to_numeric(mp.get(dur_col, 0), errors="coerce").fillna(0)
@@ -191,13 +212,13 @@ def process(part_files, reg_files):
         for f in reg_files:
             try:
                 raw = read_csv_smart(f)
-                raw = raw.rename(columns={"User Email":"Email","Zip_Postal_Code":"Zip/Postal Code"})
+                raw = raw.rename(columns=ZOOM_REGISTRATION_RENAME)
                 if "Email" not in raw.columns: skipped.append(f.name); continue
                 raw["Email"] = raw["Email"].astype(str).str.strip().str.lower()
                 m = re.search(r"\d{9,12}", f.name)
                 raw["Meeting ID"] = (m.group(0) if m else "")
-                if "Approval Status" in raw.columns:
-                    raw = raw[raw["Approval Status"].str.strip().str.lower()=="approved"]
+                if ZOOM_APPROVAL in raw.columns:
+                    raw = raw[raw[ZOOM_APPROVAL].str.strip().str.lower()==ZOOM_APPROVAL_OK]
                 raw = raw[~raw["Email"].apply(is_staff)]
                 rdfs.append(raw)
             except Exception as e:
@@ -828,11 +849,8 @@ elif page=="Follow-Up List":
     disp = ps if sf == "All" else ps[ps["Active Status"] == sf]
     if sel_email:
         disp = disp[disp["Email"]==sel_email]
-    if "Participation Count" in disp.columns:
-        disp = disp.copy()
-        disp["Completer"] = disp["Participation Count"].fillna(0).ge(10).map({True:"Completer", False:"Non-Completer"})
 
-    cols = [c for c in ["Email","First Name","Last Name","Phone","Active Status","Completer","On Hold",
+    cols = [c for c in ["Email","First Name","Last Name","Phone","Active Status","On Hold",
             "Last Attended Date","Days Since Last Attended","Last Class Attended",
             "Participant Type","Household","Comments"]
             if c in disp.columns]
@@ -951,27 +969,21 @@ elif page=="Export":
             metrics.to_excel(xl, sheet_name="Summary", index=False); wrote.append("Summary")
         except Exception: pass
 
-        #All Participants (everyone, no-shows included)
+        #Participant Status (everyone, no-shows included)
         try:
-            if "Participation Count" in ps.columns and "Completer" not in ps.columns:
-                ps = ps.copy()
-                ps["Completer"] = ps["Participation Count"].fillna(0).ge(10).map({True:"Completer", False:"Non-Completer"})
             fu_cols = [c for c in ["Email","First Name","Last Name","Phone","Participant Type",
-                       "Participation Count","Completer","Participation Status","Active Status","On Hold",
+                       "Participation Count","Participation Status","Active Status","On Hold",
                        "Last Attended Date","Days Since Last Attended","Last Class Attended",
                        "Highest level","Household","Comments"] if c in ps.columns]
-            ps[fu_cols].to_excel(xl, sheet_name="All Participants", index=False); wrote.append("All Participants")
+            ps[fu_cols].to_excel(xl, sheet_name="Participant Status", index=False); wrote.append("Participant Status")
         except Exception: pass
 
-        #Needs Follow-Up (inactive or never attended, trimmed to what outreach needs)
+        #Follow-Up (people to reach out to: dropped or never attended)
         try:
             if "Active Status" in ps.columns:
-                fdf = ps[ps["Active Status"].isin(["Inactive","Dropped","No Attendance"])]
-                fu_short = [c for c in ["First Name","Last Name","Email","Phone","Active Status",
-                            "Completer","Last Attended Date","Days Since Last Attended","On Hold","Comments"]
-                            if c in fdf.columns]
-                fdf[fu_short].to_excel(xl, sheet_name="Needs Follow-Up", index=False)
-                wrote.append("Needs Follow-Up")
+                fdf = ps[ps["Active Status"].isin(["Dropped","No Attendance"])]
+                fdf[[c for c in fu_cols if c in fdf.columns]].to_excel(xl, sheet_name="Follow-Up", index=False)
+                wrote.append("Follow-Up")
         except Exception: pass
 
         #By Class: average attendance per session
@@ -1016,7 +1028,7 @@ elif page=="Export":
 
         #safety: never write an empty workbook
         if not wrote:
-            ps.to_excel(xl, sheet_name="All Participants", index=False)
+            ps.to_excel(xl, sheet_name="Participant Status", index=False)
     st.download_button("Download Full Workbook (.xlsx)", buf.getvalue(),
                        f"TaiChi_Report_{date.today()}.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1213,14 +1225,14 @@ elif page=="Attendance Trends":
                         row["Participant Type"] = ptype_map.get(em, "Participant")
                         row["Comments"] = comments_map.get(em, "")
                         rows.append(row)
-                        meta[em] = (priority, is_flagged and bool(elsewhere))
+                        meta[nm_txt] = (priority, is_flagged and bool(elsewhere))
                     grid = pd.DataFrame(rows)
 
                     ##Optional: collapse to just the people who have been missing
                     only_flagged = st.checkbox("Show flagged only (missed the last 3 in a row)", value=False, key="at_flaggedonly")
                     if only_flagged:
-                        keep = {em for em in people if meta.get(em,(False,False))[0] or meta.get(em,(False,False))[1]}
-                        grid = grid[grid["Email"].isin(keep)]
+                        keep = [n for n in grid["Participant"] if meta.get(n,(False,False))[0] or meta.get(n,(False,False))[1]]
+                        grid = grid[grid["Participant"].isin(keep)]
 
                     grid = grid.sort_values("Participant").reset_index(drop=True)
 
@@ -1230,7 +1242,7 @@ elif page=="Attendance Trends":
                         for c in date_cols:
                             sty[c] = grid[c].map(lambda v: "background-color:#DEF2EA;color:#0F6E56" if v=="attended" else "background-color:#F6F6F4")
                         for i in grid.index:
-                            pr, _ae = meta.get(grid.at[i,"Email"], (False,False))
+                            pr, _ae = meta.get(grid.at[i,"Participant"], (False,False))
                             if pr: sty.at[i,"Participant"] = "background-color:#FAEEDA;color:#633806;font-weight:600"
                         return sty
                     disp = grid[disp_cols].copy()
@@ -1256,10 +1268,9 @@ elif page=="Attendance Trends":
                         #carry the on-screen amber highlight into the file for flagged names
                         amber = wb.add_format({"num_format":"@","bg_color":"#FAEEDA","font_color":"#633806","bold":True})
                         for i in out.index:
-                            pr, _s = meta.get(out.at[i,"Email"], (False,False))
+                            pr, _s = meta.get(out.at[i,"Participant"], (False,False))
                             if pr:
-                                for ci, cname in enumerate(out.columns):
-                                    wsx.write(i+1, ci, out.at[i, cname], amber)
+                                wsx.write(i+1, 0, out.at[i,"Participant"], amber)
                         wsx.freeze_panes(1, 0)
                     st.download_button("Download roster (.xlsx)", xbuf.getvalue(),
                         f"Roster_{unit_label.replace(' ','_')}_{date.today()}.xlsx",
