@@ -19,27 +19,6 @@ ROGUE_TOPICS = ["virtual otago", "parkinson", "sbm falls", "dissertaion",
 STAFF_KEYWORDS = ["fallsfree", "stonybrook"]
 LEVEL_MAP = {"full form": 3, "level 2": 2, "level 1": 1}
 
-# ==================================================================
-#  ZOOM FILE FORMAT SETTINGS  —  EDIT HERE if Zoom changes its exports
-# ------------------------------------------------------------------
-#  Every value below is the exact text Zoom puts in its download files.
-#  If Zoom renames a column, moves where the data starts, or changes
-#  the file type, this is the ONLY place you need to change. See the
-#  maintainer's guide for step-by-step instructions.
-# ==================================================================
-ZOOM_ENCODINGS = ["utf-8-sig", "utf-8", "latin-1", "cp1252"]  # text encodings to try when opening a file
-REG_HEADER_ROW = 5            # registration files have this many info rows before the real column headers
-ZOOM_DURATION  = "Duration (minutes).1"  # the PER-PERSON minutes column (the ".1" one). The plain
-                                         # "Duration (minutes)" is the whole meeting's length, not the person's.
-ZOOM_APPROVAL     = "Approval Status"    # registration column that says whether someone is registered
-ZOOM_APPROVAL_OK  = "approved"           # the value in that column that counts as registered
-
-# Rename maps: {what Zoom calls the column : what this app calls it}.
-# If Zoom renames a column, add or edit an entry here.
-ZOOM_PARTICIPATION_RENAME = {"ID": "Meeting ID", "User Email": "Email"}
-ZOOM_REGISTRATION_RENAME  = {"User Email": "Email", "Zip_Postal_Code": "Zip/Postal Code"}
-# ==================================================================
-
 #Styling
 st.markdown("""<style>
 [data-testid="stSidebar"] { background:#12122a; }
@@ -105,10 +84,10 @@ for _pk in ["at_mode","at_from","at_to","at_class","at_level","at_view","at_flag
 def read_csv_smart(f):
     """Read a Zoom CSV. Registration files have 5 metadata rows; participation
     files have headers on row 1. Tries header=5 first, falls back to header=0."""
-    for enc in ZOOM_ENCODINGS:
+    for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
         try:
             f.seek(0)
-            d5 = pd.read_csv(f, header=REG_HEADER_ROW, dtype=str, encoding=enc,
+            d5 = pd.read_csv(f, header=5, dtype=str, encoding=enc,
                              on_bad_lines="skip").dropna(how="all")
             d5.columns = [str(c).replace("\ufeff","").strip() for c in d5.columns]
             if len(d5.columns) >= 4 and any(
@@ -176,7 +155,7 @@ def process(part_files, reg_files):
     for f in part_files:
         try:
             raw = read_csv_smart(f)
-            raw = raw.rename(columns=ZOOM_PARTICIPATION_RENAME)
+            raw = raw.rename(columns={"ID":"Meeting ID", "User Email":"Email"})
             if "Email" not in raw.columns: skipped.append(f.name); continue
             pdfs.append(raw)
         except Exception as e:
@@ -186,7 +165,7 @@ def process(part_files, reg_files):
 
     mp = pd.concat(pdfs, ignore_index=True)
     mp["Email"] = mp["Email"].astype(str).str.strip().str.lower()
-    dur_col = ZOOM_DURATION if ZOOM_DURATION in mp.columns else \
+    dur_col = "Duration (minutes).1" if "Duration (minutes).1" in mp.columns else \
               next((c for c in mp.columns if "duration" in c.lower() and ".1" in c), None) or \
               next((c for c in mp.columns if "duration" in c.lower()), None)
     mp["dur"] = pd.to_numeric(mp.get(dur_col, 0), errors="coerce").fillna(0)
@@ -211,23 +190,38 @@ def process(part_files, reg_files):
         rdfs = []
         for f in reg_files:
             try:
+                reg_topic = ""
+                try:
+                    f.seek(0)
+                    _h = pd.read_csv(f, header=2, nrows=1, dtype=str)
+                    if "Topic" in _h.columns:
+                        reg_topic = str(_h["Topic"].iloc[0]).strip()
+                    f.seek(0)
+                except Exception:
+                    pass
                 raw = read_csv_smart(f)
-                raw = raw.rename(columns=ZOOM_REGISTRATION_RENAME)
+                raw = raw.rename(columns={"User Email":"Email","Zip_Postal_Code":"Zip/Postal Code"})
                 if "Email" not in raw.columns: skipped.append(f.name); continue
                 raw["Email"] = raw["Email"].astype(str).str.strip().str.lower()
                 m = re.search(r"\d{9,12}", f.name)
                 raw["Meeting ID"] = (m.group(0) if m else "")
-                if ZOOM_APPROVAL in raw.columns:
-                    raw = raw[raw[ZOOM_APPROVAL].str.strip().str.lower()==ZOOM_APPROVAL_OK]
+                raw["_RegTopic"] = reg_topic
+                if "Approval Status" in raw.columns:
+                    raw = raw[raw["Approval Status"].str.strip().str.lower()=="approved"]
                 raw = raw[~raw["Email"].apply(is_staff)]
                 rdfs.append(raw)
             except Exception as e:
                 skipped.append(f"{f.name} ({e})")
         if rdfs:
             mr = pd.concat(rdfs, ignore_index=True)
-            # map meeting ID -> topic from participation
+            # class name: prefer the topic written INSIDE the registration file (filenames may be
+            # renamed and no longer contain the Zoom meeting ID). Fall back to the ID->topic map.
             id_topic = mp.drop_duplicates("Meeting ID").set_index("Meeting ID")["Topic"].to_dict()
-            mr["Topic"] = mr["Meeting ID"].map(id_topic)
+            mapped = mr["Meeting ID"].map(id_topic)
+            if "_RegTopic" in mr.columns:
+                mr["Topic"] = mr["_RegTopic"].where(mr["_RegTopic"].astype(str).str.strip()!="", mapped)
+            else:
+                mr["Topic"] = mapped
 
     # ---- BUILD MERGED (participation base + never-attended registrants) ----
     merged = mp.copy()
@@ -978,12 +972,22 @@ elif page=="Export":
             ps[fu_cols].to_excel(xl, sheet_name="Participant Status", index=False); wrote.append("Participant Status")
         except Exception: pass
 
-        #Follow-Up (people to reach out to: dropped or never attended)
+        #No-Shows (registered but never attended a single class)
         try:
             if "Active Status" in ps.columns:
-                fdf = ps[ps["Active Status"].isin(["Dropped","No Attendance"])]
-                fdf[[c for c in fu_cols if c in fdf.columns]].to_excel(xl, sheet_name="Follow-Up", index=False)
-                wrote.append("Follow-Up")
+                #No-Shows: registered but never attended a single class (not time-gated)
+                fdf = ps[ps["Active Status"]=="No Attendance"].copy()
+                def _short_t(t):
+                    return t.split(":")[1].strip().split(" ET")[0] if ":" in str(t) else str(t)
+                reg_by_email = {}
+                if "Topic" in fm.columns and "Email" in fm.columns:
+                    for em, grp in fm.groupby("Email"):
+                        reg_by_email[em] = ", ".join(sorted({_short_t(t) for t in grp["Topic"].dropna().unique()}))
+                fdf["Registered Classes Not Attending"] = fdf["Email"].map(reg_by_email).fillna("")
+                ns_cols = [c for c in ["First Name","Last Name","Email","Phone","Active Status",
+                           "Registered Classes Not Attending","On Hold","Comments"] if c in fdf.columns]
+                fdf[ns_cols].to_excel(xl, sheet_name="No-Shows", index=False)
+                wrote.append("No-Shows")
         except Exception: pass
 
         #By Class: average attendance per session
@@ -1181,9 +1185,14 @@ elif page=="Attendance Trends":
 
                     #here (attended in the shown window) vs no-show (registered but never attended at all)
                     attended_here = set(cdf["Email"].dropna().unique())
-                    attended_ever = set(att[att["Topic"].isin(cur_topics)]["Email"].dropna().unique())
-                    unit_reg = set(fm[fm["Topic"].isin(cur_topics)]["Email"].dropna().unique()) if "Topic" in fm.columns else set()
-                    noshow_here = set(e for e in unit_reg if e not in attended_ever)
+                    #No-show is judged PER CLASS: registered for a class but never attended THAT class.
+                    #The level's list is the union of its classes, so it can't be smaller than any one class.
+                    noshow_here = set()
+                    if "Topic" in fm.columns:
+                        for _t in cur_topics:
+                            reg_t = set(fm[fm["Topic"]==_t]["Email"].dropna())
+                            att_t = set(att[att["Topic"]==_t]["Email"].dropna())
+                            noshow_here |= (reg_t - att_t)
                     people = sorted(attended_here | noshow_here)
 
                     #flag: judge each person only on the classes they attend, within the window shown
@@ -1216,7 +1225,9 @@ elif page=="Attendance Trends":
                                   if em in nm.index and "First Name" in nm.columns else em) or em
                         is_flagged = (em in flagged_here) or (em in noshow_here)
                         elsewhere = sorted(set(active_elsewhere.get(em, [])))
-                        priority = is_flagged and not elsewhere
+                        #Rule A: absent from THIS class/level = flagged, regardless of other classes.
+                        #Active elsewhere only adds a note; it never removes them from the list.
+                        priority = is_flagged
                         row = {"Participant": nm_txt, "Email": em}
                         for d, c in zip(sess, date_cols):
                             row[c] = "attended" if em in present_by[d] else ""
